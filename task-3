@@ -1,0 +1,49 @@
+import tensorflow as tf
+import numpy as np
+from music21 import converter, instrument, note, chord, stream
+
+def load_notes(midi_files):
+    notes = []
+    for file in midi_files:
+        midi = converter.parse(file)
+        parts = instrument.partitionByInstrument(midi)
+        elements = parts.parts[0].recurse() if parts else midi.flat.notes
+        for el in elements:
+            notes.append(str(el.pitch) if isinstance(el, note.Note) else '.'.join(str(n) for n in el.normalOrder))
+    return notes
+
+def prepare_sequences(notes, seq_len):
+    unique_notes = sorted(set(notes))
+    note_to_int = {note: num for num, note in enumerate(unique_notes)}
+    sequences = [[note_to_int[n] for n in notes[i:i + seq_len]] for i in range(len(notes) - seq_len)]
+    inputs = np.reshape(sequences, (len(sequences), seq_len, 1)) / float(len(unique_notes))
+    outputs = tf.keras.utils.to_categorical([note_to_int[notes[i + seq_len]] for i in range(len(sequences))])
+    return inputs, outputs, {i: n for n, i in note_to_int.items()}
+
+
+def build_model(input_shape, output_dim):
+    model = tf.keras.Sequential([
+        tf.keras.layers.LSTM(256, input_shape=input_shape, return_sequences=True),
+        tf.keras.layers.LSTM(256), tf.keras.layers.Dense(output_dim, activation='softmax')
+    ])
+    model.compile(loss='categorical_crossentropy', optimizer='adam')
+    return model
+
+def generate_music(model, seed, int_to_note, seq_len, length=100, output_file="output.mid"):
+    prediction_output, pattern = [], seed[np.random.randint(0, len(seed) - 1)]
+    for _ in range(length):
+        prediction = model.predict(np.reshape(pattern, (1, seq_len, 1)), verbose=0)
+        index = np.argmax(prediction)
+        prediction_output.append(int_to_note[index])
+        pattern = np.append(pattern, index / float(len(int_to_note)))[1:]
+    offset, notes = 0, []
+    for p in prediction_output:
+        notes.append(note.Note(p, offset=offset) if '.' not in p else chord.Chord([int(n) for n in p.split('.')], offset=offset))
+        offset += 0.5
+    stream.Stream(notes).write('midi', fp=output_file)
+
+notes = load_notes(["path_to_midi_1.mid"])
+inputs, outputs, int_to_note = prepare_sequences(notes, seq_len=100)
+model = build_model((inputs.shape[1], inputs.shape[2]), len(int_to_note))
+model.fit(inputs, outputs, epochs=50, batch_size=64)
+generate_music(model, inputs, int_to_note, seq_len=100)
